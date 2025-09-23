@@ -1,97 +1,138 @@
-#!/usr/bin/env python3
-"""
-Test runner for findChessboardCorners function.
-Usage: python test_findChessboardCorners.py image_path
-"""
-
-import sys
 import os
-import numpy as np
-from time import time
+import cv2
+import argparse
+from video_helpers import VideoContainer
 
-# Import the required functions
-from chessboard_finder import findChessboardCorners
-from helper_image_loading import loadImageGrayscale
-
-def test_findChessboardCorners(image_path):
+def extract_frames(video_path, output_dir="frames", frame_format="png", interval_seconds=0.5):
     """
-    Test runner for findChessboardCorners function.
+    Extract frames from an MP4 video at specified time intervals and save as individual images.
     
     Args:
-        image_path (str): Path to the image file to test
-        
-    Returns:
-        tuple: (corners, processing_time) where corners is the result from findChessboardCorners
-               and processing_time is the time taken in seconds
+        video_path (str): Path to the input MP4 video file
+        output_dir (str): Directory to save extracted frames (default: "frames")
+        frame_format (str): Image format for saved frames (default: "png")
+        interval_seconds (float): Time interval between extracted frames in seconds (default: 0.5)
     """
-    print(f"Testing findChessboardCorners with image: {image_path}")
     
-    # Check if file exists
-    if not os.path.exists(image_path):
-        print(f"Error: Image file '{image_path}' not found.")
-        return None, None
+    # Create output directory if it doesn't exist
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"Created output directory: {output_dir}")
     
+    # Initialize video container
     try:
-        # Load image as grayscale PIL image
-        print("Loading image...")
-        img_pil = loadImageGrayscale(image_path)
+        video = VideoContainer(video_path)
+        print(f"Video loaded successfully:")
+        print(f"  - Total frames: {video.frame_count}")
+        print(f"  - Frame rate: {video.frame_rate:.2f} fps")
+        print(f"  - Resolution: {video.frame_width}x{video.frame_height}")
+        print(f"  - Duration: {video.frame_count/video.frame_rate:.2f} seconds")
+        print(f"  - Extracting every {interval_seconds} seconds")
+    except Exception as e:
+        print(f"Error loading video: {e}")
+        return
+    
+    # Calculate frame interval based on time interval
+    frame_interval = int(video.frame_rate * interval_seconds)
+    total_duration = video.frame_count / video.frame_rate
+    estimated_frames = int(total_duration / interval_seconds) + 1
+    
+    print(f"  - Frame interval: every {frame_interval} frames")
+    print(f"  - Estimated output frames: {estimated_frames}")
+    
+    # Extract and save frames at intervals
+    extracted_count = 0
+    try:
+        # Start from frame 0
+        video.seek_to(0)
         
-        if img_pil is None:
-            print("Error: Failed to load image.")
-            return None, None
+        frame_num = 0
+        while frame_num < video.frame_count:
+            # Seek to the specific frame
+            video.seek_to(frame_num)
             
-        # Convert PIL image to numpy array as required by findChessboardCorners
-        print("Converting to numpy array...")
-        img_arr = np.asarray(img_pil, dtype=np.float32)
-        
-        print(f"Image shape: {img_arr.shape}")
-        print("Processing with findChessboardCorners...")
-        
-        # Time the function execution
-        start_time = time()
-        corners = findChessboardCorners(img_arr)
-        processing_time = time() - start_time
-        
-        print(f"Processing completed in {processing_time:.4f} seconds")
-        
-        # Display results
-        if corners is not None:
-            print(f"✅ Chessboard corners found: {corners}")
-            print(f"   Top-left corner: ({corners[0]}, {corners[1]})")
-            print(f"   Bottom-right corner: ({corners[2]}, {corners[3]})")
+            # Read the current frame
+            frame = video.read()
             
-            # Calculate board dimensions
-            board_width = corners[2] - corners[0]
-            board_height = corners[3] - corners[1]
-            print(f"   Board dimensions: {board_width} x {board_height} pixels")
-        else:
-            print("❌ No chessboard corners detected in the image")
+            if frame is None:
+                print(f"Warning: Could not read frame {frame_num}")
+                break
             
-        return corners, processing_time
+            # Calculate timestamp for this frame
+            timestamp = frame_num / video.frame_rate
+            
+            # Generate filename with timestamp
+            filename = f"frame_{extracted_count:06d}_t{timestamp:.1f}s.{frame_format}"
+            filepath = os.path.join(output_dir, filename)
+            
+            # Save the frame
+            success = cv2.imwrite(filepath, frame)
+            
+            if success:
+                extracted_count += 1
+                print(f"Extracted frame {extracted_count}: {filename} (frame #{frame_num})")
+            else:
+                print(f"Error: Could not save frame {frame_num} to {filepath}")
+            
+            # Move to next interval
+            frame_num += frame_interval
+        
+        print(f"\nExtraction complete!")
+        print(f"Successfully extracted {extracted_count} frames to '{output_dir}' directory")
+        print(f"Frames extracted every {interval_seconds} seconds")
         
     except Exception as e:
-        print(f"Error during processing: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return None, None
+        print(f"Error during frame extraction: {e}")
+    
+    finally:
+        # Clean up
+        video._cap.release()
 
 def main():
-    """Main function to run the test with command line arguments."""
-    if len(sys.argv) != 2:
-        print("Usage: python test_findChessboardCorners.py <image_path>")
-        print("Example: python test_findChessboardCorners.py test_chessboard.png")
-        sys.exit(1)
+    """Main function to handle command line arguments and run frame extraction."""
+    parser = argparse.ArgumentParser(
+        description="Extract frames from an MP4 video at specified time intervals"
+    )
+    parser.add_argument(
+        "input_video", 
+        help="Path to the input MP4 video file"
+    )
+    parser.add_argument(
+        "-o", "--output", 
+        default="frames",
+        help="Output directory for extracted frames (default: frames)"
+    )
+    parser.add_argument(
+        "-f", "--format",
+        default="png", 
+        choices=["png", "jpg", "jpeg", "bmp"],
+        help="Image format for saved frames (default: png)"
+    )
+    parser.add_argument(
+        "-i", "--interval",
+        type=float,
+        default=0.5,
+        help="Time interval between extracted frames in seconds (default: 0.5)"
+    )
     
-    image_path = sys.argv[1]
-    corners, processing_time = test_findChessboardCorners(image_path)
+    args = parser.parse_args()
     
-    if corners is not None:
-        print(f"\n🎯 Test completed successfully!")
-        print(f"   Corners: {corners}")
-        print(f"   Processing time: {processing_time:.4f}s")
-    else:
-        print(f"\n❌ Test failed - no corners detected or error occurred")
-        sys.exit(1)
+    # Check if input video exists
+    if not os.path.exists(args.input_video):
+        print(f"Error: Video file '{args.input_video}' not found")
+        return
+    
+    # Check if input is a video file
+    if not args.input_video.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
+        print(f"Warning: '{args.input_video}' may not be a supported video format")
+    
+    # Validate interval
+    if args.interval <= 0:
+        print(f"Error: Interval must be greater than 0 seconds")
+        return
+    
+    print(f"Starting frame extraction from: {args.input_video}")
+    extract_frames(args.input_video, args.output, args.format, args.interval)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
