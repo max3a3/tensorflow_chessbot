@@ -4,7 +4,7 @@ import numpy as np
 import argparse
 from video_helpers import VideoContainer
 
-def extract_frames(video_path, output_dir="frames", frame_format="png", interval_seconds=0.5, diff_threshold=500):
+def extract_frames(video_path, output_dir="frames", frame_format="png", interval_seconds=0.5, diff_threshold=500, denoise=True):
     """
     Extract frames from an MP4 video at specified time intervals and save as individual images.
     Only saves frames that are significantly different from the previous saved frame.
@@ -15,6 +15,7 @@ def extract_frames(video_path, output_dir="frames", frame_format="png", interval
         frame_format (str): Image format for saved frames (default: "png")
         interval_seconds (float): Time interval between extracted frames in seconds (default: 0.5)
         diff_threshold (int): Minimum sum of absolute differences to consider frames different (default: 500)
+        denoise (bool): Apply denoising to reduce false positives from noise (default: True)
     """
     
     # Create output directory if it doesn't exist
@@ -32,6 +33,7 @@ def extract_frames(video_path, output_dir="frames", frame_format="png", interval
         print(f"  - Duration: {video.frame_count/video.frame_rate:.2f} seconds")
         print(f"  - Extracting every {interval_seconds} seconds")
         print(f"  - Difference threshold: {diff_threshold}")
+        print(f"  - Denoising enabled: {denoise}")
     except Exception as e:
         print(f"Error loading video: {e}")
         return
@@ -68,6 +70,10 @@ def extract_frames(video_path, output_dir="frames", frame_format="png", interval
             # Convert current frame to grayscale for comparison
             current_frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             
+            # Apply denoising if enabled
+            if denoise:
+                current_frame_gray = denoise_frame(current_frame_gray)
+            
             # Check if this frame is different enough from the previous saved frame
             should_save = True
             diff_sum = 0
@@ -75,6 +81,11 @@ def extract_frames(video_path, output_dir="frames", frame_format="png", interval
             if previous_frame_gray is not None:
                 # Calculate absolute difference between current and previous frame
                 diff = cv2.absdiff(current_frame_gray, previous_frame_gray)
+                
+                # Apply additional morphological operations to reduce noise in difference
+                if denoise:
+                    diff = denoise_difference(diff)
+                
                 diff_sum = np.sum(diff)
                 
                 # Only save if difference is above threshold
@@ -117,6 +128,53 @@ def extract_frames(video_path, output_dir="frames", frame_format="png", interval
         # Clean up
         video._cap.release()
 
+def denoise_frame(frame_gray):
+    """
+    Apply denoising to a grayscale frame to reduce noise before comparison.
+    
+    Args:
+        frame_gray (numpy.ndarray): Grayscale frame
+        
+    Returns:
+        numpy.ndarray: Denoised grayscale frame
+    """
+    # Apply Gaussian blur to reduce high-frequency noise
+    denoised = cv2.GaussianBlur(frame_gray, (3, 3), 0)
+    
+    # Optional: Apply Non-local Means Denoising for better results (slower)
+    # Uncomment the line below for better denoising at the cost of performance
+    # denoised = cv2.fastNlMeansDenoising(denoised, None, 10, 7, 21)
+    
+    return denoised
+
+def denoise_difference(diff):
+    """
+    Apply morphological operations to clean up the difference image,
+    removing small noise artifacts while preserving significant changes.
+    
+    Args:
+        diff (numpy.ndarray): Difference image from cv2.absdiff
+        
+    Returns:
+        numpy.ndarray: Cleaned difference image
+    """
+    # Apply a small threshold to eliminate very small differences (likely noise)
+    _, diff_thresh = cv2.threshold(diff, 10, 255, cv2.THRESH_BINARY)
+    
+    # Apply morphological operations to remove small noise
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    
+    # Opening: erosion followed by dilation (removes small noise)
+    diff_opened = cv2.morphologyEx(diff_thresh, cv2.MORPH_OPEN, kernel)
+    
+    # Closing: dilation followed by erosion (fills small gaps)
+    diff_cleaned = cv2.morphologyEx(diff_opened, cv2.MORPH_CLOSE, kernel)
+    
+    # Apply the cleaned mask to the original difference
+    result = cv2.bitwise_and(diff, diff, mask=diff_cleaned)
+    
+    return result
+
 def main():
     """Main function to handle command line arguments and run frame extraction."""
     parser = argparse.ArgumentParser(
@@ -149,6 +207,11 @@ def main():
         default=500,
         help="Minimum sum of absolute differences to consider frames different (default: 500)"
     )
+    parser.add_argument(
+        "--no-denoise",
+        action="store_true",
+        help="Disable denoising (may result in more false positives)"
+    )
     
     args = parser.parse_args()
     
@@ -172,7 +235,7 @@ def main():
         return
     
     print(f"Starting frame extraction from: {args.input_video}")
-    extract_frames(args.input_video, args.output, args.format, args.interval, args.threshold)
+    extract_frames(args.input_video, args.output, args.format, args.interval, args.threshold, not args.no_denoise)
 
 if __name__ == "__main__":
     main()
