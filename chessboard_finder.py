@@ -193,7 +193,7 @@ def findChessboardCorners(img_arr_gray, noise_threshold = 8000):
       sub_corners = np.array([
         sub_seqs_y[j][0]-corners[0]-dy, sub_seqs_x[i][0]-corners[1]-dx,
         sub_seqs_y[j][-1]-corners[0]+dy, sub_seqs_x[i][-1]-corners[1]+dx],
-        dtype=np.int)
+        dtype=int)
 
       # Generate crop candidate, nearest pixel is fine for correlation check
       sub_img = gray_img_crop.crop(sub_corners).resize((64,64)) 
@@ -420,7 +420,11 @@ if __name__ == '__main__':
   # main('http://imgur.com/p8DJMly')
   # main('https://i.imgur.com/Ns0iBrw.jpg')
   # main('https://i.imgur.com/KLcCiuk.jpg')
+
+  # main('https://imgur.com/a/R5vj3GZ')
+
   args = parser.parse_args()
   for url in args.urls:
+    print("---url",url)
     main(url)
 

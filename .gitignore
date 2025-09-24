@@ -19,3 +19,7 @@ praw.ini
 !requirements.txt
 
 !readme_images/*
+
+*.mp4
+*.json
+.idea/
