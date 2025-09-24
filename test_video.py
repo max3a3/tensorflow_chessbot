@@ -2,9 +2,12 @@ import os
 import cv2
 import numpy as np
 import argparse
+import json
+import PIL.Image
 from video_helpers import VideoContainer
+from chessboard_finder import findChessboardCorners
 
-def extract_frames(video_path, output_dir="frames", frame_format="png", interval_seconds=0.5, diff_threshold=500, denoise=True, roi=None):
+def extract_frames(video_path, output_dir="frames", frame_format="png", interval_seconds=0.5, diff_threshold=500, denoise=True, roi=None, auto_detect_chessboard=False):
     """
     Extract frames from an MP4 video at specified time intervals and save as individual images.
     Only saves frames that are significantly different from the previous saved frame.
@@ -17,6 +20,7 @@ def extract_frames(video_path, output_dir="frames", frame_format="png", interval
         diff_threshold (int): Minimum sum of absolute differences to consider frames different (default: 500)
         denoise (bool): Apply denoising to reduce false positives from noise (default: True)
         roi (tuple): Region of interest as (x, y, width, height) to focus analysis and output (default: None for full frame)
+        auto_detect_chessboard (bool): Automatically detect chessboard in each frame and use as ROI (default: False)
     """
     
     # Create output directory if it doesn't exist
@@ -35,7 +39,8 @@ def extract_frames(video_path, output_dir="frames", frame_format="png", interval
         print(f"  - Extracting every {interval_seconds} seconds")
         print(f"  - Difference threshold: {diff_threshold}")
         print(f"  - Denoising enabled: {denoise}")
-        if roi:
+        print(f"  - Auto-detect chessboard: {auto_detect_chessboard}")
+        if roi and not auto_detect_chessboard:
             print(f"  - Region of interest: x={roi[0]}, y={roi[1]}, w={roi[2]}, h={roi[3]}")
             # Validate ROI bounds
             if (roi[0] < 0 or roi[1] < 0 or 
@@ -43,7 +48,7 @@ def extract_frames(video_path, output_dir="frames", frame_format="png", interval
                 roi[1] + roi[3] > video.frame_height):
                 print(f"Error: ROI extends beyond frame boundaries")
                 return
-        else:
+        elif not auto_detect_chessboard:
             print(f"  - Region of interest: Full frame")
     except Exception as e:
         print(f"Error loading video: {e}")
@@ -60,7 +65,10 @@ def extract_frames(video_path, output_dir="frames", frame_format="png", interval
     # Extract and save frames at intervals
     extracted_count = 0
     skipped_count = 0
+    chessboard_not_found_count = 0
     previous_frame_gray = None
+    last_detected_roi = None  # Cache last successful chessboard detection
+    extracted_timestamps = []  # Store timestamps of extracted frames
     
     try:
         # Start from frame 0
@@ -78,13 +86,56 @@ def extract_frames(video_path, output_dir="frames", frame_format="png", interval
                 print(f"Warning: Could not read frame {frame_num}")
                 break
             
-            # Extract ROI if specified
-            if roi:
+            # Determine ROI for this frame
+            current_roi = roi
+            frame_for_comparison = frame
+            
+            if auto_detect_chessboard:
+                # Convert frame to grayscale for chessboard detection
+                frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+                
+                # Detect chessboard corners
+                corners = findChessboardCorners(frame_gray)
+                
+                if corners is not None:
+                    # Convert corners to ROI format (x, y, width, height)
+                    x, y, x2, y2 = corners
+                    current_roi = (int(x), int(y), int(x2 - x), int(y2 - y))
+                    last_detected_roi = current_roi  # Cache for next frame
+                    
+                    # Extract chessboard region
+                    frame_for_comparison = frame[y:y2, x:x2]
+                    
+                    print(f"Frame {frame_num}: Chessboard detected at ROI: x={current_roi[0]}, y={current_roi[1]}, w={current_roi[2]}, h={current_roi[3]}")
+                
+                elif last_detected_roi is not None:
+                    # Use last detected ROI if current detection failed
+                    current_roi = last_detected_roi
+                    x, y, w, h = current_roi
+                    
+                    # Ensure ROI is within frame bounds
+                    if (x >= 0 and y >= 0 and 
+                        x + w <= frame.shape[1] and 
+                        y + h <= frame.shape[0]):
+                        frame_for_comparison = frame[y:y+h, x:x+w]
+                        print(f"Frame {frame_num}: Using cached chessboard ROI: x={x}, y={y}, w={w}, h={h}")
+                    else:
+                        print(f"Frame {frame_num}: Cached ROI out of bounds, using full frame")
+                        frame_for_comparison = frame
+                        current_roi = None
+                
+                else:
+                    # No chessboard detected and no cached ROI
+                    chessboard_not_found_count += 1
+                    print(f"Frame {frame_num}: No chessboard detected, skipping frame")
+                    frame_num += frame_interval
+                    continue
+            
+            elif roi:
+                # Use manual ROI
                 x, y, w, h = roi
-                frame_roi = frame[y:y+h, x:x+w]
-                frame_for_comparison = frame_roi
-            else:
-                frame_for_comparison = frame
+                frame_for_comparison = frame[y:y+h, x:x+w]
+                current_roi = roi
             
             # Convert current frame to grayscale for comparison
             current_frame_gray = cv2.cvtColor(frame_for_comparison, cv2.COLOR_BGR2GRAY)
@@ -98,36 +149,53 @@ def extract_frames(video_path, output_dir="frames", frame_format="png", interval
             diff_sum = 0
             
             if previous_frame_gray is not None:
-                # Calculate absolute difference between current and previous frame
-                diff = cv2.absdiff(current_frame_gray, previous_frame_gray)
-                
-                # Apply additional morphological operations to reduce noise in difference
-                if denoise:
-                    diff = denoise_difference(diff)
-                
-                diff_sum = np.sum(diff)
-                
-                # Only save if difference is above threshold
-                should_save = diff_sum > diff_threshold
+                # Ensure frames are the same size for comparison
+                if current_frame_gray.shape == previous_frame_gray.shape:
+                    # Calculate absolute difference between current and previous frame
+                    diff = cv2.absdiff(current_frame_gray, previous_frame_gray)
+                    
+                    # Apply additional morphological operations to reduce noise in difference
+                    if denoise:
+                        diff = denoise_difference(diff)
+                    
+                    diff_sum = np.sum(diff)
+                    
+                    # Only save if difference is above threshold
+                    should_save = diff_sum > diff_threshold
+                else:
+                    # If frame sizes don't match (different ROI), always save
+                    print(f"Frame {frame_num}: Frame size changed, saving frame")
+                    should_save = True
             
             if should_save:
-                # Calculate timestamp for this frame
-                timestamp = frame_num / video.frame_rate
+                # Calculate timestamp for this frame (in seconds and milliseconds)
+                timestamp_seconds = frame_num / video.frame_rate
+                timestamp_milliseconds = int(timestamp_seconds * 1000)
                 
                 # Generate filename with timestamp
-                if roi:
-                    filename = f"frame_{extracted_count:06d}_t{timestamp:.1f}s_roi.{frame_format}"
+                if auto_detect_chessboard:
+                    filename = f"frame_{extracted_count:06d}_t{timestamp_seconds:.1f}s_chess.{frame_format}"
+                elif current_roi:
+                    filename = f"frame_{extracted_count:06d}_t{timestamp_seconds:.1f}s_roi.{frame_format}"
                 else:
-                    filename = f"frame_{extracted_count:06d}_t{timestamp:.1f}s.{frame_format}"
+                    filename = f"frame_{extracted_count:06d}_t{timestamp_seconds:.1f}s.{frame_format}"
                 filepath = os.path.join(output_dir, filename)
                 
-                # Save the frame (ROI if specified, otherwise full frame)
+                # Save the frame (chessboard/ROI if specified, otherwise full frame)
                 success = cv2.imwrite(filepath, frame_for_comparison)
                 
                 if success:
                     extracted_count += 1
-                    roi_info = f" (ROI: {roi[2]}x{roi[3]})" if roi else ""
-                    print(f"Extracted frame {extracted_count}: {filename} (frame #{frame_num}, diff: {diff_sum:.0f}){roi_info}")
+                    # Add timestamp to the list
+                    extracted_timestamps.append(timestamp_milliseconds)
+                    
+                    if auto_detect_chessboard and current_roi:
+                        roi_info = f" (Chessboard: {current_roi[2]}x{current_roi[3]})"
+                    elif current_roi:
+                        roi_info = f" (ROI: {current_roi[2]}x{current_roi[3]})"
+                    else:
+                        roi_info = ""
+                    print(f"Extracted frame {extracted_count}: {filename} (frame #{frame_num}, diff: {diff_sum:.0f}, timestamp: {timestamp_milliseconds}ms){roi_info}")
                     # Update previous frame for next comparison
                     previous_frame_gray = current_frame_gray.copy()
                 else:
@@ -139,15 +207,64 @@ def extract_frames(video_path, output_dir="frames", frame_format="png", interval
             # Move to next interval
             frame_num += frame_interval
         
+        # Save timestamps to JSON file
+        video_filename = os.path.splitext(os.path.basename(video_path))[0]
+        json_filename = f"{video_filename}.json"
+        json_filepath = os.path.join(output_dir, json_filename)
+        
+        # Create JSON data structure
+        json_data = {
+            "video_file": os.path.basename(video_path),
+            "video_path": video_path,
+            "extraction_settings": {
+                "interval_seconds": interval_seconds,
+                "diff_threshold": diff_threshold,
+                "denoise_enabled": denoise,
+                "auto_chessboard": auto_detect_chessboard,
+                "roi": roi,
+                "frame_format": frame_format
+            },
+            "video_info": {
+                "total_frames": video.frame_count,
+                "frame_rate": video.frame_rate,
+                "duration_seconds": video.frame_count / video.frame_rate,
+                "resolution": {
+                    "width": video.frame_width,
+                    "height": video.frame_height
+                }
+            },
+            "extraction_results": {
+                "frames_extracted": extracted_count,
+                "frames_skipped": skipped_count,
+                "frames_no_chessboard": chessboard_not_found_count if auto_detect_chessboard else 0,
+                "total_frames_processed": extracted_count + skipped_count + chessboard_not_found_count
+            },
+            "timestamps_milliseconds": extracted_timestamps
+        }
+        
+        try:
+            with open(json_filepath, 'w', encoding='utf-8') as json_file:
+                json.dump(json_data, json_file, indent=2, ensure_ascii=False)
+            print(f"📄 Timestamps saved to: {json_filename}")
+        except Exception as json_error:
+            print(f"⚠️  Warning: Failed to save JSON file: {str(json_error)}")
+        
         print(f"\nExtraction complete!")
         print(f"Successfully extracted {extracted_count} frames to '{output_dir}' directory")
         print(f"Skipped {skipped_count} similar frames")
+        if auto_detect_chessboard:
+            print(f"Skipped {chessboard_not_found_count} frames due to no chessboard detection")
         print(f"Frames extracted every {interval_seconds} seconds with difference threshold {diff_threshold}")
-        if roi:
+        if auto_detect_chessboard:
+            print(f"Frames automatically cropped to detected chessboard regions")
+        elif roi:
             print(f"Frames cropped to ROI: {roi[2]}x{roi[3]} pixels")
+        print(f"Timestamps saved to: {json_filename} ({len(extracted_timestamps)} timestamps)")
         
     except Exception as e:
         print(f"Error during frame extraction: {e}")
+        import traceback
+        traceback.print_exc()
     
     finally:
         # Clean up
@@ -238,7 +355,12 @@ Examples:
   python test_video.py video.mp4
   python test_video.py video.mp4 -t 1000 -i 1.0
   python test_video.py video.mp4 --roi 100,50,400,400
-  python test_video.py video.mp4 --roi 0,0,640,480 -o chess_frames
+  python test_video.py video.mp4 --auto-chessboard -o chess_moves
+  python test_video.py video.mp4 --auto-chessboard -t 300 -i 2.0
+
+Output:
+  - Extracted frames saved as images in the output directory
+  - JSON file (videoname.json) with timestamps in milliseconds of extracted frames
         """
     )
     parser.add_argument(
@@ -278,6 +400,11 @@ Examples:
         type=str,
         help="Region of interest as 'x,y,width,height' (e.g., '100,50,400,300'). Only this area will be analyzed for differences and saved."
     )
+    parser.add_argument(
+        "--auto-chessboard",
+        action="store_true",
+        help="Automatically detect chessboard in each frame and use as ROI. This will only save the chessboard portion when changes are detected."
+    )
     
     args = parser.parse_args()
     
@@ -300,6 +427,11 @@ Examples:
         print(f"Error: Threshold must be non-negative")
         return
     
+    # Check for conflicting options
+    if args.roi and args.auto_chessboard:
+        print(f"Error: Cannot use both --roi and --auto-chessboard options together")
+        return
+    
     # Parse ROI if provided
     roi = None
     if args.roi:
@@ -310,8 +442,11 @@ Examples:
             print(f"Error: {e}")
             return
     
+    if args.auto_chessboard:
+        print(f"Auto-chessboard detection enabled - will detect and extract chessboard regions")
+    
     print(f"Starting frame extraction from: {args.input_video}")
-    extract_frames(args.input_video, args.output, args.format, args.interval, args.threshold, not args.no_denoise, roi)
+    extract_frames(args.input_video, args.output, args.format, args.interval, args.threshold, not args.no_denoise, roi, args.auto_chessboard)
 
 if __name__ == "__main__":
     main()
